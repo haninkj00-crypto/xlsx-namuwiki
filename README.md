@@ -1,12 +1,14 @@
 # xlsx-namuwiki
 Convert xlsx to namuwiki grammar
 
-usage: xlxstonamu [-h] [-r RANGE] [-s SHEET]
+usage: xlxstonamu.py [-h] [-r RANGE] [-s SHEET]
                   [-a {intlink,extlink,footnote,macro,table,all} [{intlink,extlink,footnote,macro,table,all} ...]]
                   [--fx {input,output}]
                   file
+파일을 바로 클릭하지 마세요. 자기 할 일만 하고 바로 꺼집니다. cmd나 PowerShell이나 Python을 킨 다음 명령줄에 입력하세요.
 
 Excel(.xlsx) 표를 나무위키 표 문법으로 변환합니다.
+Windows에서는 UTF-8을 강제하기 위해 우선 터미널(또는 cmd 또는 PowerShell 또는 Python)에서 chcp 65001 을 입력하는 것을 권장합니다.
 
 positional arguments:
   file                  변환할 Excel 파일 경로 (.xlsx)
