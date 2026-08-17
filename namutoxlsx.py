@@ -19,34 +19,13 @@ namutoxlsx.py — 나무위키 표 문법 → Excel (.xlsx) 변환기
 import re
 import sys
 import argparse
-import warnings
-import textwrap
 
 try:
     import openpyxl
     from openpyxl.styles import Alignment, PatternFill
 except ImportError:
-    print(textwrap.dedent("""
-        [오류] openpyxl 모듈이 없습니다. 아래 방법으로 설치하세요.
-
-        일반 pip:
-          pip install openpyxl
-
-        가상환경(venv/conda):
-          (venv) pip install openpyxl
-          conda install openpyxl
-
-        시스템 Python(Debian/Ubuntu, pip 제한 환경):
-          pip install --break-system-packages openpyxl
-          또는: sudo apt install python3-openpyxl
-
-        Windows(py 런처):
-          py -m pip install openpyxl
-    """).strip(), file=sys.stderr)
+    print("[오류] openpyxl 없음: pip install --break-system-packages openpyxl", file=sys.stderr)
     sys.exit(1)
-
-# openpyxl 경고 억제 (UserWarning: Unknown extension 등)
-warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 
 # ──────────────────────────────────────────────
@@ -298,6 +277,10 @@ def main():
     args = parser.parse_args()
 
     if args.input == '-':
+        if sys.stdin.isatty():
+            print("나무위키 표 텍스트를 붙여넣으세요.", file=sys.stderr)
+            print("완료 후 새 줄에서 Ctrl+D (Linux/Mac) 또는 Ctrl+Z → Enter (Windows)", file=sys.stderr)
+            print("-" * 50, file=sys.stderr)
         text = sys.stdin.read()
     else:
         with open(args.input, encoding='utf-8') as f:
