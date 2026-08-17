@@ -24,7 +24,7 @@ try:
     import openpyxl
     from openpyxl.styles import Alignment
 except ImportError:
-    print("[오류] openpyxl 없음: pip install --break-system-packages openpyxl", file=sys.stderr)
+    print("[오류] openpyxl 없음: pip install openpyxl", file=sys.stderr)
     sys.exit(1)
 
 
