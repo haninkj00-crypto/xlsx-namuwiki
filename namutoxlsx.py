@@ -19,13 +19,34 @@ namutoxlsx.py — 나무위키 표 문법 → Excel (.xlsx) 변환기
 import re
 import sys
 import argparse
+import warnings
+import textwrap
 
 try:
     import openpyxl
     from openpyxl.styles import Alignment, PatternFill
 except ImportError:
-    print("[오류] openpyxl 없음: pip install --break-system-packages openpyxl", file=sys.stderr)
+    print(textwrap.dedent("""
+        [오류] openpyxl 모듈이 없습니다. 아래 방법으로 설치하세요.
+
+        일반 pip:
+          pip install openpyxl
+
+        가상환경(venv/conda):
+          (venv) pip install openpyxl
+          conda install openpyxl
+
+        시스템 Python(Debian/Ubuntu, pip 제한 환경):
+          pip install --break-system-packages openpyxl
+          또는: sudo apt install python3-openpyxl
+
+        Windows(py 런처):
+          py -m pip install openpyxl
+    """).strip(), file=sys.stderr)
     sys.exit(1)
+
+# openpyxl 경고 억제 (UserWarning: Unknown extension 등)
+warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 
 # ──────────────────────────────────────────────
