@@ -22,9 +22,9 @@ import argparse
 
 try:
     import openpyxl
-    from openpyxl.styles import Alignment
+    from openpyxl.styles import Alignment, PatternFill
 except ImportError:
-    print("[오류] openpyxl 없음: pip install openpyxl", file=sys.stderr)
+    print("[오류] openpyxl 없음: pip install --break-system-packages openpyxl", file=sys.stderr)
     sys.exit(1)
 
 
@@ -62,6 +62,12 @@ def strip_markup(text):
         if text == prev:
             break
 
+    # 이스케이프된 대괄호를 placeholder로 보호 (링크 파싱망 회피)
+    text = re.sub(r'\\\[', '\x01', text)
+    text = re.sub(r'\\\]', '\x02', text)
+    # 나머지 이스케이프 문법 문자 해제 (경로 등 일반 백슬래시는 보존)
+    text = re.sub(r'\\([\\{|}\'~\-_*#])', r'\1', text)
+
     # [br] → 개행 (링크 처리 전에)
     text = text.replace('[br]', '\n')
 
@@ -74,7 +80,8 @@ def strip_markup(text):
     text = re.sub(r'\[youtube\([^\)]*\)\]', '', text)
     text = text.replace("'''", '').replace("''", '')
     text = text.replace('__', '').replace('~~', '')
-    text = text.replace('\\', '')
+    # placeholder 복원
+    text = text.replace('\x01', '[').replace('\x02', ']')
     return text.strip()
 
 
@@ -195,7 +202,13 @@ def build_grid(table_lines):
                 colspan = 1
 
             text = strip_markup(content_str)
-            grid[r][c] = {'text': text, 'colspan': colspan, 'rowspan': rowspan}
+            bgcolor = None
+            m = re.search(r'<bgcolor=#?([0-9a-fA-F]{3,6})', attr_str)
+            if m:
+                raw = m.group(1).upper()
+                # 3자리 → 6자리 확장 (f00 → ff0000)
+                bgcolor = ''.join(c*2 for c in raw) if len(raw) == 3 else raw
+            grid[r][c] = {'text': text, 'colspan': colspan, 'rowspan': rowspan, 'bgcolor': bgcolor}
 
             for dr in range(rowspan):
                 for dc in range(colspan):
@@ -226,10 +239,15 @@ def write_xlsx(grid, num_rows, num_cols, output_path, sheet_name='Sheet1'):
             text = cell_data['text']
             colspan = cell_data['colspan']
             rowspan = cell_data['rowspan']
+            bgcolor = cell_data.get('bgcolor')
 
             er, ec = r + 1, c + 1
             cell = ws.cell(row=er, column=ec, value=text)
             cell.alignment = Alignment(wrap_text=True, vertical='top')
+            if bgcolor:
+                cell.fill = PatternFill(start_color='FF' + bgcolor,
+                                        end_color='FF' + bgcolor,
+                                        fill_type='solid')
 
             if colspan > 1 or rowspan > 1:
                 ws.merge_cells(
