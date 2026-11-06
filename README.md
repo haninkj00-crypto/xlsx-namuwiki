@@ -8,15 +8,15 @@
 
 | 파일 | 방향 | 설명 |
 |---|---|---|
-| `xlxstonamu.py` | xlsx → 나무위키 | Excel 표를 나무위키 문법으로 변환 |
+| `xlsxtonamu.py` | xlsx → 나무위키 | Excel 표를 나무위키 문법으로 변환 |
 | `namutoxlsx.py` | 나무위키 → xlsx | 나무위키 RAW 표 문법을 Excel로 변환 |
 
 ---
 
-## xlxstonamu.py — Excel → 나무위키
+## xlsxtonamu.py — Excel → 나무위키
 
 ```
-usage: xlxstonamu.py [-h] [-r RANGE] [-s SHEET]
+usage: xlsxtonamu.py [-h] [-r RANGE] [-s SHEET]
                      [-a {intlink,extlink,footnote,macro,table,all} [...]]
                      [--fx {input,output}]
                      file
@@ -51,9 +51,9 @@ usage: xlxstonamu.py [-h] [-r RANGE] [-s SHEET]
 ### 예시
 
 ```bash
-xlxstonamu.py table.xlsx
-xlxstonamu.py table.xlsx -r A1:D10 -s Sheet2
-xlxstonamu.py table.xlsx -a intlink extlink --fx input
+xlsxtonamu.py table.xlsx
+xlsxtonamu.py table.xlsx -r A1:D10 -s Sheet2
+xlsxtonamu.py table.xlsx -a intlink extlink --fx input
 ```
 
 ---
@@ -92,7 +92,7 @@ cat raw.txt | python namutoxlsx.py - output.xlsx
 
 ## 변환 범위 및 한계
 
-### xlxstonamu.py
+### xlsxtonamu.py
 - 병합 셀 → `<-N>` / `<|N>` 속성으로 변환
 - 셀 배경색 → `<bgcolor=#xxxxxx>` 속성으로 변환
 - 폰트 서식(굵게·기울임·밑줄·취소선) → 나무위키 마크업으로 변환
