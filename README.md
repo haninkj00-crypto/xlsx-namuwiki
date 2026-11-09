@@ -1,132 +1,145 @@
-# namu-xlsx-converter
+# NamuMark ↔ Excel table converter
 
-나무위키 표 문법 ↔ Excel(.xlsx) 양방향 변환기
+`xlxstonamu.py` converts an `.xlsx` worksheet/range into NamuMark table syntax.
+`namutoxlsx.py` reads the first table block in a NamuMark text file and writes
+an `.xlsx` workbook. Both scripts use `namu_common.py`; keep the three Python
+files in the same directory.
 
----
+## Requirements
 
-## 파일 구성
+- Python 3.9 or newer is recommended.
+- `openpyxl` 3.1 or newer.
 
-| 파일 | 방향 | 설명 |
-|---|---|---|
-| `xlsxtonamu.py` | xlsx → 나무위키 | Excel 표를 나무위키 문법으로 변환 |
-| `namutoxlsx.py` | 나무위키 → xlsx | 나무위키 RAW 표 문법을 Excel로 변환 |
-
----
-
-## xlsxtonamu.py — Excel → 나무위키
-
-```
-usage: xlsxtonamu.py [-h] [-r RANGE] [-s SHEET]
-                     [-a {intlink,extlink,footnote,macro,table,all} [...]]
-                     [--fx {input,output}]
-                     file
-```
-
-> **주의:** 파일을 더블클릭하지 마세요. cmd/PowerShell/Python 터미널에서 실행하세요.  
-> Windows에서는 UTF-8 강제를 위해 먼저 `chcp 65001` 입력을 권장합니다.
-
-### 인수
-
-| 인수 | 설명 |
-|---|---|
-| `file` | 변환할 Excel 파일 경로 (.xlsx) |
-| `-r RANGE` | 변환할 셀 범위 (예: `A1:D5`). 생략 시 시트 전체 |
-| `-s SHEET` | 대상 시트명. 생략 시 첫 번째 시트 |
-| `-a ...` | 이스케이프 없이 원형 유지할 나무위키 문법 지정 |
-| `--fx {input,output}` | 수식 처리 방식. `output`: 계산된 결과값(기본값), `input`: 수식 문자열 그대로 |
-
-`-a` 옵션 값 (지정한 문법은 이스케이프하지 않고 원형 유지):
-
-| 값 | 보존되는 토큰 |
-|---|---|
-| `intlink` | `[[`, `]]` |
-| `extlink` | `[http`로 시작하는 외부링크, `]` |
-| `footnote` | `[*` |
-| `macro` | `{{{#`, `[include`, `[youtube` |
-| `table` | `\|\|` |
-| `all` | 위 전체 |
-
-> **주의:** 폰트 서식 토큰(`'''`, `''`, `__`, `~~`, `--`)은 `-a` 지정과 무관하게 **항상 이스케이프**됩니다.
-
-### 예시
-
-```bash
-xlsxtonamu.py table.xlsx
-xlsxtonamu.py table.xlsx -r A1:D10 -s Sheet2
-xlsxtonamu.py table.xlsx -a intlink extlink --fx input
-```
-
----
-
-## namutoxlsx.py — 나무위키 → Excel
-
-```
-usage: namutoxlsx.py [-h] [--sheet SHEET] input output
-```
-
-### 인수
-
-| 인수 | 설명 |
-|---|---|
-| `input` | 입력 파일 경로 (.txt 등). `-` 이면 stdin |
-| `output` | 출력 파일 경로 (.xlsx) |
-| `--sheet SHEET` | 시트 이름. 생략 시 `Sheet1` |
-
-### 지원 문법
-
-- `\|\|` 분리 파싱 — `||||||` 방식(빈 토큰 누적)과 `<-N>` 방식 모두 처리
-- `<-N>` colspan, `<|N>` rowspan → 엑셀 병합 셀로 변환
-- 큰 colspan 자동 clamp (실제 그리드 폭 초과 시 잘라냄)
-- `[br]` → 엑셀 셀 내 개행
-- 마크업 자동 제거: `{{{#색상}}}`, `[[링크|텍스트]]`, `[*각주]`, `[[파일:]]`, `'''굵게'''` 등
-
-### 예시
-
-```bash
-python namutoxlsx.py input.txt output.xlsx
-python namutoxlsx.py input.txt output.xlsx --sheet 시간표
-cat raw.txt | python namutoxlsx.py - output.xlsx
-```
-
----
-
-## 변환 범위 및 한계
-
-### xlsxtonamu.py
-- 병합 셀 → `<-N>` / `<|N>` 속성으로 변환
-- 셀 배경색 → `<bgcolor=#xxxxxx>` 속성으로 변환
-- 폰트 서식(굵게·기울임·밑줄·취소선) → 나무위키 마크업으로 변환
-- 날짜·시간 서식 → `YYYY-MM-DD` / `HH:MM:SS` 문자열로 변환 (`--fx output` 기본값)
-- 숫자·통화 등 날짜 외 특수 서식이 적용된 셀 → **오류 중단** (엑셀에서 텍스트로 확정 후 재실행 필요)
-- 셀 내 줄바꿈(Alt+Enter) → `[br]` 변환
-
-**서식별 동작 정리:**
-
-| 엑셀 서식 | 동작 | 비고 |
-|---|---|---|
-| 텍스트(`@`) | 입력값 그대로 출력 | 가장 안전 |
-| 일반(`General`) + 문자열 값 | 그대로 출력 | 노선번호·이름 등 |
-| 일반(`General`) + 숫자/부동소수점 값 | 원시값 그대로 출력 | 의도와 다를 수 있음 |
-| 일반(`General`) + 날짜·시간 값 | `YYYY-MM-DD` / `HH:MM:SS` 변환 | `--fx output` 기준 |
-| 숫자·통화 등 특수 서식 | **오류 중단** | 엑셀에서 텍스트 서식으로 변환 후 재실행 |
-
-> 나무위키 표는 보이는 텍스트가 곧 내용이므로, 엑셀의 숫자 서식처럼 동일한 값(`1000`)이 `1,000`·`₩1,000`·`1.0E+3` 등으로 달리 표시될 수 있는 경우는 변환 전 셀 서식을 **텍스트(`@`)로 확정**하는 것을 권장합니다.
-
-### namutoxlsx.py
-- 굵기나 기울임꼴 등 서식 정보는 변환하지 않음 (텍스트 내용과 병합 구조, 색상 정도만 보존)
-- `{{{#!wiki}}}` 중첩 블록 내부 표는 미지원
-- `<nopad>` 전용 빈 셀 행은 빈 행으로 출력됨
-
----
-
-## 요구사항
-
--Windows 전체, Linux 가상 환경(venv 등)
 ```cmd
-pip install openpyxl
+python -m pip install openpyxl
 ```
 
--Linux 시스템(pip 시도 시 external... --break-system-packages 뜨는 경우)
-```bash
+Debian/Ubuntu system package alternative:
+
+```sh
 sudo apt install python3-openpyxl
 ```
+
+## Excel → NamuMark
+
+```sh
+python3 xlxstonamu.py workbook.xlsx
+python3 xlxstonamu.py workbook.xlsx -s Sheet2 -r A1:F30
+python3 xlxstonamu.py workbook.xlsx -s Sheet2 -r A1:F30 -o table.namu
+# 숫자/날짜가 있는 파일은 처리 방식을 명시해야 합니다.
+python3 xlxstonamu.py workbook.xlsx -o table.namu --number-format raw --date-format iso
+```
+
+Options:
+
+- `-s/--sheet`: worksheet name; defaults to the first worksheet.
+- `-r/--range`: A1-style range; defaults to the worksheet's used dimensions.
+- `-o/--output`: write UTF-8 text to a file; defaults to stdout.
+- `--fx output|input`: output the saved formula result or the formula expression.
+  `output` is the default. `openpyxl` does not calculate formulas.
+- `--formula-fallback formula|blank|error`: behavior when a formula has no
+  cached result. The default emits the formula expression with a warning.
+- `--merge-range expand|error|clip`: behavior when the selected range cuts
+  through a merged cell. Default `expand` preserves the whole merge.
+- `--number-format stop|raw|approx`: default `stop` aborts the entire conversion
+  when any numeric cell is encountered. This includes General numbers, currency,
+  accounting, and percentages because their displayed form can depend on Excel,
+  application, OS, and regional settings. `raw` explicitly emits the stored
+  numeric value. `approx` explicitly invokes the retained Python formatter for
+  common formats; it is an approximation, not Excel's rendering engine.
+  `display` remains as a compatibility alias for `approx` and emits a warning.
+- `--date-format stop|iso|serial`: default `stop` aborts when a date/time-formatted
+  cell is encountered. `iso` explicitly emits a normalized ISO-like string;
+  `serial` emits the underlying Excel day serial. Neither reproduces Excel's
+  locale-dependent date/time display.
+- `--strict-format` makes the optional approximate numeric formatter stop on
+  unsupported patterns. Without it, the formatter warns and uses the raw number
+  for that cell only.
+- `--hyperlinks display|external`: show a hyperlink's display text only (default)
+  or generate an external NamuMark link.
+- `-a/--apply`: leave selected user-entered NamuMark syntax unescaped. Choices:
+  `intlink`, `extlink`, `footnote`, `macro`, `table`, or `all`.
+- `--no-wrapper`: omit the outer `#!wiki style="word-break: keep-all"` block.
+
+By default, literal cell content is escaped so text such as `[[page]]`, `||`,
+`[date]`, `'''`, and `{{{` does not unexpectedly become markup. Excel font
+bold/italic/underline/strike and RGB/indexed font colors are applied afterward
+as deliberate NamuMark formatting. Solid RGB/indexed fills, horizontal and
+vertical alignment, and merged ranges are also exported.
+
+## NamuMark → Excel
+
+```sh
+python3 namutoxlsx.py table.namu output.xlsx
+python3 namutoxlsx.py table.namu output.xlsx --sheet 시간표
+cat table.namu | python3 namutoxlsx.py - output.xlsx
+```
+
+```cmd
+type table.namu | python3 namutoxlsx.py - output.xlsx
+```
+
+
+Options:
+
+- `--sheet`: output worksheet name (default `Sheet1`).
+- `--strict`: stop instead of recovering from malformed table rows.
+- `--max-columns`: guard against accidental oversized spans (default Excel's
+  maximum of 16,384 columns).
+- `--no-caption`: ignore a `|caption|` table caption.
+
+The parser recognizes ordinary `||` rows, repeated-pipe implicit colspans,
+`<-N>` colspans, `<|N>` rowspans, common table/row/column/cell colors, text
+colors, `<thead>`, alignment, cell width/height, table border color, and common
+inline formatting. External links become Excel hyperlinks. Images and footnotes
+are not embedded; file links are omitted from the cell text. `#!folding` labels
+and bodies are flattened into text.
+
+## Conversion model and limitations
+
+This is a **table-oriented converter**, not a complete the seed renderer or a
+lossless XLSX serialization format.
+
+1. The reverse parser extracts the first top-level table. A table may be inside
+   an outer `#!wiki`, `#!folding`, or `#!if` wrapper. Literal/code blocks are
+   skipped. Nested tables inside a table cell are not flattened into the
+   parent grid; extract and convert them separately.
+2. Mixed inline formatting within one cell is flattened to text and represented
+   as cell-wide Excel styling. A run-by-run rich-text model is not produced.
+3. `#!if` expressions are not evaluated. Their body text is extracted and a
+   warning is emitted. `#!syntax`/`#!latex` bodies are treated as text, not run
+   or rendered. `#!html` is reduced to visible text with a lightweight tag
+   removal pass.
+4. Include/video macros, images, and footnotes are not executed or embedded.
+   Dynamic macros such as `[date]` remain literal because there is no live wiki
+   renderer available.
+5. Excel formulas are not recalculated. In `--fx output` mode, only a value
+   previously cached by Excel/LibreOffice can be read. Save/recalculate the
+   workbook in a spreadsheet application to refresh cached values.
+6. Locale- or application-dependent Excel values are guarded by default:
+   conversion stops at the first numeric, currency, percentage, date, or time
+   cell. The caller must explicitly choose `--number-format raw|approx` and/or
+   `--date-format iso|serial`. The retained numeric formatter handles only a
+   subset of common patterns and is not a reproduction of Excel's renderer.
+   Conditional, elapsed-time, locale-specific, and exotic formats remain
+   unsupported by that optional approximation.
+7. RGB and indexed colors are supported. Theme/tint colors are not resolved;
+   the Excel → NamuMark direction writes the same explicit color for light and
+   dark themes. Conditional formatting, rich text, individual border topology,
+   charts, images, print settings, and hidden rows/columns are not converted.
+8. Column widths and row heights in NamuMark tables are approximated in Excel
+   units. Browser CSS pixels and Excel character-width units are not identical.
+9. Round-tripping is semantic, not byte-for-byte: the result aims to preserve
+   visible cell text, basic styling, and merge geometry, not workbook internals.
+
+## Tests
+
+Run the built-in regression suite from this directory:
+
+```sh
+python -m unittest discover -s tests -v
+```
+
+The tests cover parsing of pipe runs and attributes, escaped delimiters,
+wrapper/code-block table extraction, font/color/link conversion, number formats,
+merged-cell geometry, formula cache behavior, and a representative round trip.
