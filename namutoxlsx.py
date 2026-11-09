@@ -1,321 +1,317 @@
-"""
-namutoxlsx.py — 나무위키 표 문법 → Excel (.xlsx) 변환기
+#!/usr/bin/env python3
+"""Convert a NamuMark table block to an Excel .xlsx workbook."""
+from __future__ import annotations
 
-지원:
-  - || 분리 파싱 (빈 문자열 토큰 → colspan 누적)
-  - ||||||  방식과 <-N> 방식 모두 처리
-  - <|N> rowspan
-  - 큰 colspan clamp (실제 그리드 폭 기준)
-  - 텍스트 추출 (색상/링크/각주/마크업 제거)
-  - [br] → 엑셀 개행
-  - 병합 셀 openpyxl 적용
-
-사용:
-  python namutoxlsx.py input.txt output.xlsx
-  python namutoxlsx.py input.txt output.xlsx --sheet "시간표"
-  cat input.txt | python namutoxlsx.py - output.xlsx
-"""
-
+import argparse
 import re
 import sys
-import argparse
-import warnings
 import textwrap
+import warnings
 
 try:
     import openpyxl
-    from openpyxl.styles import Alignment, PatternFill
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
 except ImportError:
     print(textwrap.dedent("""
-        [오류] openpyxl 모듈이 없습니다. 아래 방법으로 설치하세요.
-
-        일반 pip:
-          pip install openpyxl
-
-        가상환경(venv/conda):
-          (venv) pip install openpyxl
-          conda install openpyxl
-
-        시스템 Python(Debian/Ubuntu, pip 제한 환경):
-          pip install --break-system-packages openpyxl
-          또는: sudo apt install python3-openpyxl
-
-        Windows(py 런처):
-          py -m pip install openpyxl
+        [오류] openpyxl 모듈이 없습니다.
+          python -m pip install openpyxl
+          Debian/Ubuntu: sudo apt install python3-openpyxl
     """).strip(), file=sys.stderr)
-    sys.exit(1)
+    raise SystemExit(1)
 
-# openpyxl 경고 억제 (UserWarning: Unknown extension 등)
+from namu_common import ParsedCell, TableData, parse_table, strip_markup_details
+
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
-
-# ──────────────────────────────────────────────
-# 1. 텍스트 정제
-# ──────────────────────────────────────────────
-
-def strip_markup(text):
-    """나무위키 마크업을 제거하고 순수 텍스트만 반환."""
-    if not text:
-        return ""
-
-    # [[파일:...]] 제거
-    text = re.sub(r'\[\[파일:[^\]]*\]\]', '', text)
-
-    # [*각주] 제거 — 내부 [[링크]] 보호 후 제거
-    def remove_footnotes(s):
-        protected = []
-        def protect(m):
-            protected.append(m.group(0))
-            return f'\x00{len(protected)-1}\x00'
-        s = re.sub(r'\[\[[^\]]*\]\]', protect, s)
-        s = re.sub(r'\[\*[^\]]*\]', '', s)
-        for i, orig in enumerate(protected):
-            s = s.replace(f'\x00{i}\x00', orig)
-        return s
-    text = remove_footnotes(text)
-
-    # {{{ }}} 반복 처리 (중첩 대응)
-    for _ in range(5):
-        prev = text
-        text = re.sub(r'\{\{\{#[\w,#]+\s(.*?)\}\}\}', r'\1', text, flags=re.DOTALL)
-        text = re.sub(r'\{\{\{[+-]\d\s(.*?)\}\}\}', r'\1', text, flags=re.DOTALL)
-        text = re.sub(r'\{\{\{(.*?)\}\}\}', r'\1', text, flags=re.DOTALL)
-        if text == prev:
-            break
-
-    # 이스케이프된 대괄호를 placeholder로 보호 (링크 파싱망 회피)
-    text = re.sub(r'\\\[', '\x01', text)
-    text = re.sub(r'\\\]', '\x02', text)
-    # 나머지 이스케이프 문법 문자 해제 (경로 등 일반 백슬래시는 보존)
-    text = re.sub(r'\\([\\{|}\'~\-_*#])', r'\1', text)
-
-    # [br] → 개행 (링크 처리 전에)
-    text = text.replace('[br]', '\n')
-
-    # [[링크|표시텍스트]] → 표시텍스트 (개행 포함 DOTALL)
-    text = re.sub(r'\[\[([^\]|]+)\|(.+?)\]\]', r'\2', text, flags=re.DOTALL)
-    # [[링크]] → 링크
-    text = re.sub(r'\[\[([^\]]+)\]\]', r'\1', text)
-
-    text = re.sub(r'\[include\([^\)]*\)\]', '', text)
-    text = re.sub(r'\[youtube\([^\)]*\)\]', '', text)
-    text = text.replace("'''", '').replace("''", '')
-    text = text.replace('__', '').replace('~~', '')
-    # placeholder 복원
-    text = text.replace('\x01', '[').replace('\x02', ']')
-    return text.strip()
+EXCEL_MAX_COLS = 16384
+EXCEL_MAX_ROWS = 1048576
 
 
-# ──────────────────────────────────────────────
-# 2. 행 파싱
-# ──────────────────────────────────────────────
-
-def parse_cell_attrs(attr_str):
-    """<-N>, <|N> 속성 문자열에서 colspan/rowspan 추출."""
-    colspan = 1
-    rowspan = 1
-    m = re.search(r'<-(\d+)>', attr_str)
-    if m:
-        colspan = int(m.group(1))
-    m = re.search(r'<\|(\d+)>', attr_str)
-    if m:
-        rowspan = int(m.group(1))
-    return colspan, rowspan
-
-
-def split_row(line):
-    """
-    나무위키 표 한 행 → 셀 토큰 리스트.
-    반환: list of (attr_str, content_str)
-
-    규칙:
-      빈 토큰("") → 앞 셀 colspan +1  (||||||  방식)
-      공백 포함 토큰(" ") → 별개의 빈 셀
-    """
-    line = line.strip()
-    if not line.startswith('||'):
-        return []
-    if line.endswith('||'):
-        line = line[:-2]
-    line = line[2:]
-
-    raw_tokens = line.split('||')
-    cells = []
-    pending = 0  # 빈 토큰 누적
-
-    for tok in raw_tokens:
-        if tok == '':
-            pending += 1
-        else:
-            if pending > 0 and cells:
-                attr, content = cells[-1]
-                m = re.search(r'<-(\d+)>', attr)
-                if m:
-                    old = int(m.group(1))
-                    attr = re.sub(r'<-\d+>', f'<-{old + pending}>', attr)
-                else:
-                    attr = f'<-{1 + pending}>' + attr
-                cells[-1] = (attr, content)
-                pending = 0
-
-            attr_match = re.match(r'^((?:<[^>]*>)*)(.*)', tok, re.DOTALL)
-            if attr_match:
-                attr_str = attr_match.group(1)
-                content_str = attr_match.group(2)
-            else:
-                attr_str = ''
-                content_str = tok
-            cells.append((attr_str, content_str))
-
-    # 루프 끝 잔여 빈 토큰
-    if pending > 0 and cells:
-        attr, content = cells[-1]
-        m = re.search(r'<-(\d+)>', attr)
-        if m:
-            old = int(m.group(1))
-            attr = re.sub(r'<-\d+>', f'<-{old + pending}>', attr)
-        else:
-            attr = f'<-{1 + pending}>' + attr
-        cells[-1] = (attr, content)
-
-    return cells
+def _to_px(value, base_px: float | None = None) -> float | None:
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    m = re.fullmatch(r"([0-9.]+)(px|pt|em|%)?", s)
+    if not m:
+        return None
+    number = float(m.group(1))
+    unit = m.group(2) or "px"
+    if unit == "%":
+        return base_px * number / 100.0 if base_px is not None else None
+    if unit == "pt":
+        return number * 96.0 / 72.0
+    if unit == "em":
+        return number * 16.0
+    return number
 
 
-# ──────────────────────────────────────────────
-# 3. 그리드 구성
-# ──────────────────────────────────────────────
-
-def extract_table_lines(text):
-    return [l.strip() for l in text.splitlines() if l.strip().startswith('||')]
+def _excel_width_from_px(px: float) -> float:
+    # Approximate Excel's character-width units using Calibri 11 metrics.
+    return max(0.1, (px - 5.0) / 7.0)
 
 
-def build_grid(table_lines):
-    parsed_rows = [split_row(l) for l in table_lines]
-    if not parsed_rows:
+def _set_font(cell, *, bold=None, italic=None, underline=None, strike=None, color=None):
+    old = cell.font
+    cell.font = Font(
+        name=old.name, sz=old.sz, b=old.b if bold is None else bold,
+        i=old.i if italic is None else italic,
+        u=old.u if underline is None else ("single" if underline else None),
+        strike=old.strike if strike is None else strike,
+        color=("FF" + color if isinstance(color, str) and re.fullmatch(r"[0-9A-Fa-f]{6}", color) else (color or old.color)), vertAlign=old.vertAlign,
+        charset=old.charset, family=old.family, scheme=old.scheme,
+        outline=old.outline, shadow=old.shadow, condense=old.condense,
+        extend=old.extend,
+    )
+
+
+def _set_fill(cell, color):
+    if color:
+        cell.fill = PatternFill(fill_type="solid", fgColor="FF" + color)
+
+
+def _apply_border(ws, rows: int, cols: int, color: str):
+    side = Side(style="thin", color="FF" + color)
+    border = Border(left=side, right=side, top=side, bottom=side)
+    for row in ws.iter_rows(min_row=1, max_row=rows, min_col=1, max_col=cols):
+        for cell in row:
+            cell.border = border
+
+
+def _build_grid(table: TableData, max_columns: int = EXCEL_MAX_COLS):
+    """Place cells on a real occupancy grid; no arbitrary +50 padding."""
+    if not table.rows:
         return [], 0, 0
-
-    # 1패스: 그리드 최대 폭 추정
+    occupancy: set[tuple[int, int]] = set()
+    anchors: dict[tuple[int, int], ParsedCell] = {}
+    num_rows = len(table.rows)
     max_cols = 0
-    for cells in parsed_rows:
-        col_sum = sum(parse_cell_attrs(attr)[0] for attr, _ in cells)
-        if col_sum > max_cols:
-            max_cols = col_sum
 
-    num_rows = len(parsed_rows)
-    PAD = 50
-    grid = [[None] * (max_cols + PAD) for _ in range(num_rows + PAD)]
-    occupied = {}
+    for r, cells in enumerate(table.rows):
+        col = 0
+        for cell in cells:
+            # A new cell starts at the first free position. Its whole colspan
+            # must also be free of rowspans originating above this row.
+            while True:
+                while (r, col) in occupancy:
+                    col += 1
+                if all((r, col + dc) not in occupancy for dc in range(cell.colspan)):
+                    break
+                col += 1
+            end_col = col + cell.colspan
+            if end_col > max_columns:
+                raise ValueError(
+                    f"표의 열 수가 제한({max_columns})을 초과합니다. 셀 {r + 1}행의 병합 속성을 확인하십시오."
+                )
+            end_row = r + cell.rowspan
+            if end_row > EXCEL_MAX_ROWS:
+                raise ValueError("rowspan을 포함한 행 수가 Excel 최대 행 수를 초과합니다.")
 
-    for r, cells in enumerate(parsed_rows):
-        c = 0
-        for attr_str, content_str in cells:
-            while occupied.get((r, c)):
-                c += 1
+            # Detect overlaps rather than silently overwriting another cell.
+            for rr in range(r, end_row):
+                for cc in range(col, end_col):
+                    if (rr, cc) in occupancy:
+                        raise ValueError(f"병합 셀이 겹칩니다: 행 {rr + 1}, 열 {cc + 1}")
+            anchors[(r, col)] = cell
+            for rr in range(r, end_row):
+                for cc in range(col, end_col):
+                    if (rr, cc) != (r, col):
+                        occupancy.add((rr, cc))
+            col = end_col
+            max_cols = max(max_cols, col)
+            num_rows = max(num_rows, end_row)
 
-            colspan, rowspan = parse_cell_attrs(attr_str)
-
-            # colspan clamp
-            remaining = max_cols - c
-            if remaining < 1:
-                remaining = 1
-            colspan = min(colspan, remaining)
-            if colspan < 1:
-                colspan = 1
-
-            text = strip_markup(content_str)
-            bgcolor = None
-            m = re.search(r'<bgcolor=#?([0-9a-fA-F]{3,6})', attr_str)
-            if m:
-                raw = m.group(1).upper()
-                # 3자리 → 6자리 확장 (f00 → ff0000)
-                bgcolor = ''.join(c*2 for c in raw) if len(raw) == 3 else raw
-            grid[r][c] = {'text': text, 'colspan': colspan, 'rowspan': rowspan, 'bgcolor': bgcolor}
-
-            for dr in range(rowspan):
-                for dc in range(colspan):
-                    if dr == 0 and dc == 0:
-                        continue
-                    occupied[(r + dr, c + dc)] = True
-
-            c += colspan
-
+    if max_cols > max_columns:
+        raise ValueError(f"표 너비가 최대 열 제한({max_columns})을 초과합니다.")
+    grid = [[None for _ in range(max_cols)] for _ in range(num_rows)]
+    for (r, c), cell in anchors.items():
+        grid[r][c] = cell
     return grid, num_rows, max_cols
 
 
-# ──────────────────────────────────────────────
-# 4. 엑셀 출력
-# ──────────────────────────────────────────────
-
-def write_xlsx(grid, num_rows, num_cols, output_path, sheet_name='Sheet1'):
+def _write_grid(
+    table: TableData,
+    grid,
+    num_rows: int,
+    num_cols: int,
+    output_path: str,
+    sheet_name: str,
+    include_caption: bool = True,
+):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = sheet_name
 
+    caption_text = strip_markup_details(table.caption).text if table.caption and include_caption else ""
+    row_offset = 1 if caption_text else 0
+    if caption_text:
+        c = ws.cell(1, 1, caption_text)
+        c.font = Font(bold=True)
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        if num_cols > 1:
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(1, num_cols))
+
+    table_style = table.table_attrs
+    table_bg = table_style.get("tablebgcolor")
+    table_color = table_style.get("tablecolor")
+    border_color = table_style.get("tablebordercolor")
+    column_styles: dict[str, dict[int, str]] = {"colbgcolor": {}, "colcolor": {}}
+
+    # A numeric table width is used as a soft total-width hint, not a strict
+    # browser pixel layout. Explicit cell widths take precedence.
+    table_px = _to_px(table_style.get("tablewidth"))
+    if table_px and num_cols:
+        default_px = table_px / num_cols
+        for col in range(1, num_cols + 1):
+            ws.column_dimensions[get_column_letter(col)].width = _excel_width_from_px(default_px)
+
     for r in range(num_rows):
-        for c in range(num_cols):
-            cell_data = grid[r][c]
+        row_data = [x for x in grid[r] if x is not None]
+        row_style: dict[str, str] = {}
+        header_row = any(cell_data.options.get("thead") for cell_data in row_data)
+        for cell_data in row_data:
+            if cell_data.options.get("rowbgcolor"):
+                row_style["rowbgcolor"] = cell_data.options["rowbgcolor"]
+            if cell_data.options.get("rowcolor"):
+                row_style["rowcolor"] = cell_data.options["rowcolor"]
+        if row_style.get("rowbgcolor"):
+            for col in range(1, num_cols + 1):
+                _set_fill(ws.cell(r + 1 + row_offset, col), row_style["rowbgcolor"])
+        if row_style.get("rowcolor"):
+            for col in range(1, num_cols + 1):
+                _set_font(ws.cell(r + 1 + row_offset, col), color=row_style["rowcolor"])
+
+        for col, cell_data in enumerate(grid[r]):
             if cell_data is None:
                 continue
+            er, ec = r + 1 + row_offset, col + 1
+            details = strip_markup_details(cell_data.content)
+            cell = ws.cell(er, ec, details.text)
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
 
-            text = cell_data['text']
-            colspan = cell_data['colspan']
-            rowspan = cell_data['rowspan']
-            bgcolor = cell_data.get('bgcolor')
+            # Table/row/column/cell precedence mirrors NamuMark's broad model.
+            opts = cell_data.options
+            if opts.get("colbgcolor"):
+                column_styles["colbgcolor"][col] = opts["colbgcolor"]
+            if opts.get("colcolor"):
+                column_styles["colcolor"][col] = opts["colcolor"]
+            bg = opts.get("bgcolor") or column_styles["colbgcolor"].get(col) or row_style.get("rowbgcolor") or table_bg
+            fg = details.color or opts.get("color") or column_styles["colcolor"].get(col) or row_style.get("rowcolor") or table_color
+            _set_fill(cell, bg)
+            _set_font(
+                cell,
+                bold=details.bold or header_row or bool(opts.get("thead")),
+                italic=details.italic,
+                underline=details.underline,
+                strike=details.strike,
+                color=fg,
+            )
+            if details.hyperlink:
+                cell.hyperlink = details.hyperlink
 
-            er, ec = r + 1, c + 1
-            cell = ws.cell(row=er, column=ec, value=text)
-            cell.alignment = Alignment(wrap_text=True, vertical='top')
-            if bgcolor:
-                cell.fill = PatternFill(start_color='FF' + bgcolor,
-                                        end_color='FF' + bgcolor,
-                                        fill_type='solid')
+            horizontal = opts.get("align")
+            vertical = opts.get("valign")
+            cell.alignment = Alignment(
+                horizontal=horizontal if horizontal in {"left", "center", "right"} else "general",
+                vertical=vertical if vertical in {"top", "center", "bottom"} else "top",
+                wrap_text=True,
+            )
 
-            if colspan > 1 or rowspan > 1:
+            width_px = _to_px(opts.get("width"), table_px)
+            if width_px and cell_data.colspan == 1:
+                ws.column_dimensions[get_column_letter(ec)].width = _excel_width_from_px(width_px)
+            elif width_px and cell_data.colspan > 1:
+                each = _excel_width_from_px(width_px / cell_data.colspan)
+                for cc in range(ec, ec + cell_data.colspan):
+                    ws.column_dimensions[get_column_letter(cc)].width = each
+
+            height_px = _to_px(opts.get("height"))
+            if height_px:
+                ws.row_dimensions[er].height = height_px * 0.75
+
+            if cell_data.colspan > 1 or cell_data.rowspan > 1:
                 ws.merge_cells(
                     start_row=er, start_column=ec,
-                    end_row=er + rowspan - 1,
-                    end_column=ec + colspan - 1
+                    end_row=er + cell_data.rowspan - 1,
+                    end_column=ec + cell_data.colspan - 1,
                 )
 
+    # Table defaults apply also to unfilled cells. Apply them after writing.
+    for row in ws.iter_rows(min_row=1 + row_offset, max_row=num_rows + row_offset,
+                            min_col=1, max_col=max(1, num_cols)):
+        for cell in row:
+            if table_bg and cell.fill.fill_type is None:
+                _set_fill(cell, table_bg)
+            if table_color and cell.font.color is None:
+                _set_font(cell, color=table_color)
+    if border_color and num_rows and num_cols:
+        _apply_border(ws, num_rows + row_offset, num_cols, border_color)
+
+    # Freeze panes for long tables and set a readable default view.
+    if num_rows >= 2 and any(c.options.get("thead") for c in table.rows[0]):
+        ws.freeze_panes = f"A{2 + row_offset}"
+    ws.sheet_view.showGridLines = True
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
     wb.save(output_path)
-    print(f"저장 완료: {output_path}  ({num_rows}행 × {num_cols}열)", file=sys.stderr)
+    wb.close()
 
 
-# ──────────────────────────────────────────────
-# 5. 메인
-# ──────────────────────────────────────────────
+def namu_to_xlsx(text: str, output_path: str, sheet_name: str = "Sheet1",
+                 strict: bool = False, max_columns: int = EXCEL_MAX_COLS,
+                 include_caption: bool = True):
+    table = parse_table(text, strict=strict)
+    if not table.rows:
+        raise ValueError("표 행(||로 시작하는 행)을 찾지 못했습니다.")
+    grid, rows, cols = _build_grid(table, max_columns=max_columns)
+    if not cols:
+        raise ValueError("표의 열 수를 계산하지 못했습니다.")
+    _write_grid(table, grid, rows, cols, output_path, sheet_name, include_caption)
+    return rows, cols, table.warnings
 
-def main():
-    parser = argparse.ArgumentParser(
-        prog='namutoxlsx',
-        description='나무위키 표 문법 → Excel(.xlsx) 변환기',
-        epilog='예시:\n  python namutoxlsx.py input.txt output.xlsx\n  cat raw.txt | python namutoxlsx.py - out.xlsx',
-        formatter_class=argparse.RawDescriptionHelpFormatter
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="namutoxlsx",
+        description="나무위키 표 문법을 Excel(.xlsx)로 변환합니다.",
+        epilog="예시:\n  python namutoxlsx.py input.txt output.xlsx\n  cat raw.txt | python namutoxlsx.py - out.xlsx\n  python namutoxlsx.py input.txt out.xlsx --sheet 시간표",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument('input', help='입력 파일 경로 (- 이면 stdin)')
-    parser.add_argument('output', help='출력 .xlsx 파일 경로')
-    parser.add_argument('--sheet', default='Sheet1', help='시트 이름 (기본: Sheet1)')
-    args = parser.parse_args()
-
-    if args.input == '-':
-        if sys.stdin.isatty():
-            print("나무위키 표 텍스트를 붙여넣으세요.", file=sys.stderr)
-            print("완료 후 새 줄에서 Ctrl+D (Linux/Mac) 또는 Ctrl+Z → Enter (Windows)", file=sys.stderr)
-            print("-" * 50, file=sys.stderr)
-        text = sys.stdin.read()
-    else:
-        with open(args.input, encoding='utf-8') as f:
-            text = f.read()
-
-    table_lines = extract_table_lines(text)
-    if not table_lines:
-        print("[오류] 표 행(|| 시작)을 찾지 못했습니다.", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"표 행 {len(table_lines)}줄 발견", file=sys.stderr)
-    grid, num_rows, num_cols = build_grid(table_lines)
-    write_xlsx(grid, num_rows, num_cols, args.output, sheet_name=args.sheet)
+    p.add_argument("input", help="입력 텍스트 파일 경로 (- 이면 stdin)")
+    p.add_argument("output", help="출력 .xlsx 파일 경로")
+    p.add_argument("--sheet", default="Sheet1", help="시트 이름 (기본: Sheet1)")
+    p.add_argument("--strict", action="store_true", help="잘못된 표 구문이 있으면 복구하지 않고 중단")
+    p.add_argument("--max-columns", type=int, default=EXCEL_MAX_COLS,
+                   help=f"최대 표 열 수 (기본: {EXCEL_MAX_COLS})")
+    p.add_argument("--no-caption", action="store_true", help="|캡션| 형식의 캡션 행을 생략")
+    return p
 
 
-if __name__ == '__main__':
-    main()
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        if args.max_columns < 1 or args.max_columns > EXCEL_MAX_COLS:
+            raise ValueError(f"--max-columns는 1~{EXCEL_MAX_COLS} 범위여야 합니다.")
+        if args.input == "-":
+            if sys.stdin.isatty():
+                print("나무위키 표 텍스트를 입력한 뒤 Ctrl+D(Linux/macOS) 또는 Ctrl+Z 후 Enter(Windows)를 누르세요.", file=sys.stderr)
+            source = sys.stdin.read()
+        else:
+            with open(args.input, "r", encoding="utf-8-sig") as f:
+                source = f.read()
+        rows, cols, notes = namu_to_xlsx(
+            source, args.output, sheet_name=args.sheet, strict=args.strict,
+            max_columns=args.max_columns, include_caption=not args.no_caption,
+        )
+        for note in notes:
+            print("[경고] " + note, file=sys.stderr)
+        print(f"저장 완료: {args.output} ({rows}행 × {cols}열)", file=sys.stderr)
+        return 0
+    except Exception as exc:
+        print(f"[오류] {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
